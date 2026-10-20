@@ -3,7 +3,7 @@
 
 ### Descripción
 
-Desarrollo de un monitor multiparamétrico de bajo costo basado en sistemas embebidos, orientado al monitoreo continuo de signos vitales y a la detección temprana del deterioro clínico en instituciones de atención primaria, especialmente en zonas rurales de Colombia.
+Desarrollo de un monitor multiparamétrico de bajo costo basado en sistemas embebidos, orientado al monitoreo continuo de signos vitales y a la detección temprana del deterioro clínico en instituciones de atención primaria, especialmente en zonas rurales de Antioquia, Colombia.
 
 El prototipo integra adquisición y procesamiento de señales fisiológicas, visualización local, alarmas y comunicación inalámbrica para facilitar el seguimiento del estado del paciente.
 
