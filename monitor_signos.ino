@@ -1,11 +1,12 @@
 /*
  * AFE4950 + ESP32 -> NEXTION  (versión FreeRTOS)
  * ECG + PPG + HR + PR + SpO2 + PRESIÓN ARTERIAL (PTT + PIR) + BUZZER
+ * + FRECUENCIA RESPIRATORIA ESTIMADA (ECG + PPG)
  * + ALARMAS NEWS2 + ALARMAS TÉCNICAS
  *
  * Núcleo 1 (tiempo real):
  *   T_adq    prio 5 : única dueña del AFE4950. Lee el FIFO, decodifica y encola.
- *   T_proc   prio 3 : filtros, Pan-Tompkins, FC/PR, lead-off, PA (PTT+PIR), gráfica.
+ *   T_proc   prio 3 : filtros, Pan-Tompkins, FC/PR, lead-off, PA (PTT+PIR), FR, gráfica.
  *   T_sonido prio 2 : única dueña del buzzer.
  * Núcleo 0 (comunicaciones):
  *   T_display prio 2: única dueña de Serial (= Nextion). Lee "CAL <SBP> <DBP>".
@@ -17,6 +18,7 @@
 #include <Arduino.h>
 #include <AFE4950.h>
 #include "biosignals.h"
+#include "RespRateEstimator.h"   // [FR]
 
 // ---------------- PINES AFE4950 ----------------
 #define SCLK      18
@@ -39,6 +41,7 @@
 
 #define SIMULAR_NEWS2       0      // 1 = valores simulados que recorren todos los niveles
 #define USAR_PAS_EN_NEWS2   0      // 1 = incluir la PAS por PTT en el NEWS2
+#define USAR_FR_EN_NEWS2    0      // [FR] 1 = incluir la FR estimada en el NEWS2 (validar antes)
 
 // ---------------- FC / PR ----------------
 #define TIMEOUT_LATIDO_MS   4000   // sin latidos en este tiempo -> FC/PR = 0
@@ -49,6 +52,17 @@
 #define LOFF_PP_MIN_V       0.00001f  // AJUSTAR: menos que esto = señal plana
 #define LOFF_PP_MAX_V       0.5f      // AJUSTAR: más que esto = ruido de electrodo suelto
 #define LOFF_SAT_V          1.0f      // AJUSTAR: |promedio| mayor = saturado
+
+// ---------------- [FR] FRECUENCIA RESPIRATORIA ESTIMADA ----------------
+#define NEX_OBJ_FR           "nFR"     // Number en la Nextion (0 = sin valor)
+#define NEX_OBJ_FR_TXT       "tFRest"  // Text opcional con el estado de la estimación
+#define USAR_TEXTO_ESTADO_FR 0         // 1 si agregas el Text tFRest en la Nextion
+#define FR_CAL_MS            5000UL    // se mide la tasa real de ECG durante 5 s
+#define DEBUG_FR_SERIAL1     0         // 1 = detalle de cada ventana por Serial1 (TX en GPIO33)
+#define DEBUG_TX_PIN         33
+
+#define FR_EST_CAL_RELOJ     10        // códigos extra de estado (además de RespRate::Status)
+#define FR_EST_CONFIG        11
 
 // ---------------- PRESIÓN ARTERIAL (PTT + PIR) ----------------
 #define FS_PA        500      // Hz (sincronizado con el ECG a 500 Hz)
@@ -117,8 +131,8 @@ static const float SPAN_MIN_PPG_V = 0.0020f;
 // ============================================================
 
 enum TipoMsg : uint8_t {
-  MSG_ECG = 0,        // v = voltios
-  MSG_PPG,            // v = voltios
+  MSG_ECG = 0,        // v = voltios, a = 1 si la muestra está saturada  [FR]
+  MSG_PPG,            // v = voltios, a = 1 si la muestra está saturada  [FR]
   MSG_ESTADO_SPO2,    // a = nuevo estado del sensor (0 = sin dedo)
   MSG_SPO2,           // a = SpO2 calculada (%)
   MSG_PIR             // v = PIR del procesador SpO2 (0 = no válido)
@@ -145,7 +159,7 @@ struct Signos {              // T_proc -> T_display / T_sonido / T_alarma (mailb
   int     pr;                // lpm PPG (0 = sin dato)
   int     spo2;              // %
   uint8_t estadoSpo2;        // 0 = sin dedo, 1 = estabilizando, 2 = válida
-  int     fr;                // rpm   (-1 = no disponible todavía)
+  int     fr;                // rpm   (-1 = no disponible)
   float   temp;              // °C    (-1 = no disponible todavía)
   int     pas;               // mmHg para NEWS2 (-1 = no disponible)
   int     sbp;               // mmHg para pantalla (0 = sin dato)
@@ -153,6 +167,7 @@ struct Signos {              // T_proc -> T_display / T_sonido / T_alarma (mailb
   bool    ecgDesconectado;   // lead-off por software
   int     calPpUv;           // calibración lead-off: pico a pico (µV)
   int     calMediaMv;        // calibración lead-off: promedio (mV)
+  uint8_t frEstado;          // [FR] RespRate::Status o FR_EST_CAL_RELOJ / FR_EST_CONFIG
 };
 
 struct EscalaAutomatica {
@@ -233,6 +248,18 @@ static int   nCal = 0;
 
 static int sbpEstable = 0;
 static int dbpEstable = 0;
+
+
+// ============================================================
+// [FR] ESTADO DE FRECUENCIA RESPIRATORIA  (SOLO lo toca T_proc)
+// Global: el estimador ocupa ~13 KB, no cabe en el stack de la tarea.
+// ============================================================
+
+static RespRate::Estimator frEst;
+static bool     frCalibrando    = true;
+static bool     frDeshabilitado = false;
+static uint32_t frCalInicioUs = 0, frCalMuestras = 0;
+static uint32_t frTbInicioUs  = 0, frTbMuestras  = 0;
 
 
 // ============================================================
@@ -480,6 +507,89 @@ void calcularPA(float ptt, float pir) {
 
 
 // ============================================================
+// [FR] FRECUENCIA RESPIRATORIA — llamadas solo desde T_proc
+// Se alimenta con la muestra CRUDA (cuentas del ADC), antes de los
+// filtros visuales: el pasa-altos de 0.5 Hz de la gráfica no la afecta.
+// ============================================================
+
+// Mide la tasa real de ECG (el AFE usa reloj interno) y luego alimenta el estimador.
+void frAlimentarEcg(float cuentas, bool saturada) {
+  if (frDeshabilitado) return;
+
+  if (frCalibrando) {
+    if (frCalMuestras == 0) frCalInicioUs = micros();
+    frCalMuestras++;
+    uint32_t dt = micros() - frCalInicioUs;
+    if (dt >= FR_CAL_MS * 1000UL) {
+      float fsMedida = (float)frCalMuestras * 1.0e6f / (float)dt;
+      if (fsMedida < 0.8f * FS_ECG_HZ || fsMedida > 1.25f * FS_ECG_HZ) {
+        frDeshabilitado = true;     // el AFE no está en 500 Hz / ECG,ECG,PPG
+        return;
+      }
+      frEst.begin(fsMedida, 2);     // 2 muestras de ECG por cada muestra de PPG
+      frCalibrando = false;
+      frTbInicioUs = micros();
+      frTbMuestras = 0;
+    }
+    return;
+  }
+
+  frTbMuestras++;
+  bool nuevaVentana = frEst.pushEcg(cuentas, saturada);
+
+  // Cada 20 s se corrige la deriva lenta del reloj del AFE
+  uint32_t dt = micros() - frTbInicioUs;
+  if (dt >= 20000000UL) {
+    frEst.setTimeBase((float)frTbMuestras * 1.0e6f / (float)dt);
+    frTbInicioUs = micros();
+    frTbMuestras = 0;
+  }
+
+#if DEBUG_FR_SERIAL1
+  if (nuevaVentana) {
+    const RespRate::Result& w = frEst.lastWindow();
+    char b[140];
+    snprintf(b, sizeof(b),
+             "FR st=%d raw=%.1f f=[%.1f %.1f %.1f %.1f %.1f] q=[%.2f %.2f %.2f %.2f %.2f] mot=0x%X\r\n",
+             (int)w.status, w.rrRaw,
+             w.featBpm[0], w.featBpm[1], w.featBpm[2], w.featBpm[3], w.featBpm[4],
+             w.featQ[0], w.featQ[1], w.featQ[2], w.featQ[3], w.featQ[4], (unsigned)w.reasons);
+    Serial1.print(b);
+  }
+#else
+  (void)nuevaVentana;
+#endif
+}
+
+void frAlimentarPpg(float cuentas, bool saturada) {
+  if (!frCalibrando && !frDeshabilitado) frEst.pushPpg(cuentas, saturada);
+}
+
+// Llena s.fr (-1 = sin valor) y s.frEstado. Llamar una vez por segundo.
+void frActualizarSignos(Signos& s) {
+  if (frDeshabilitado) { s.fr = -1; s.frEstado = FR_EST_CONFIG;    return; }
+  if (frCalibrando)    { s.fr = -1; s.frEstado = FR_EST_CAL_RELOJ; return; }
+
+  RespRate::Result r = frEst.snapshot();
+  s.frEstado = (uint8_t)r.status;
+  s.fr = r.hasValue ? (int)(r.rrBpm + 0.5f) : -1;
+}
+
+const char* textoEstadoFR(uint8_t e) {
+  switch (e) {
+    case FR_EST_CAL_RELOJ:        return "calentando";
+    case FR_EST_CONFIG:           return "config?";
+    case RespRate::ST_WARMUP:     return "calentando";
+    case RespRate::ST_OK_HIGH:    return "estimada";     // ECG y PPG coinciden
+    case RespRate::ST_OK_MEDIUM:  return "est 1 sens";   // coincide un solo sensor
+    case RespRate::ST_HELD:       return "retenida";     // ventana actual no fiable
+    case RespRate::ST_UNRELIABLE: return "no fiable";
+    default:                      return "sin senal";
+  }
+}
+
+
+// ============================================================
 // NEWS2 (escala 1 de SpO2). Cada función devuelve 0-3, o -1 si no hay dato.
 // ============================================================
 
@@ -596,8 +706,11 @@ void tareaAdq(void* arg) {
           if (raw & 0x00800000L) raw -= 0x01000000L;
           float voltios = raw * FACTOR_VOLT;
 
-          if (cicloIdx == 2) encolar(MSG_PPG, 0, voltios);
-          else               encolar(MSG_ECG, 0, voltios);
+          // [FR] Saturación según el manual del AFE: |raw| fuera de +-2^21
+          uint8_t sat = ((raw >= 2097152L) || (raw < -2097152L)) ? 1 : 0;
+
+          if (cicloIdx == 2) encolar(MSG_PPG, sat, voltios);
+          else               encolar(MSG_ECG, sat, voltios);
 
           cicloIdx = (cicloIdx + 1) % 3;
           break;
@@ -695,7 +808,7 @@ void tareaProc(void* arg) {
     xQueueSendToBack(colaGraf, &p, 0);
   };
 
-  Signos s = {0, 0, 0, 0, -1, -1.0f, -1, 0, 0, false, 0, 0};
+  Signos s = {0, 0, 0, 0, -1, -1.0f, -1, 0, 0, false, 0, 0, FR_EST_CAL_RELOJ};
   TickType_t tInfo = xTaskGetTickCount();
   Msg m;
 
@@ -706,6 +819,10 @@ void tareaProc(void* arg) {
 
       case MSG_ECG: {
         float voltios = m.v;
+
+        // [FR] muestra cruda en cuentas (antes de cualquier filtro visual)
+        frAlimentarEcg(voltios / FACTOR_VOLT, m.a != 0);
+
         if (!hayEcg) {
           biquadPrime(&ecgLP1, voltios);
           biquadPrime(&ecgLP2, voltios);
@@ -730,11 +847,9 @@ void tareaProc(void* arg) {
         B(dcBuf,  idx) = ppgFiltradaUlt;
         nMuestrasPA = idx + 1;
 
-        // Si no compila aquí: pasar biosignals.h para ajustar el tipo de retorno
         PT_Result r = pt_process_t(&ptEcg, voltios * PT_CUENTAS_POR_V_ECG, tiempoEcgUs);
         if (r.beat) {
           tUltLatEcg = xTaskGetTickCount();
-          // PA solo con electrodos bien puestos y dedo en el sensor
           if (!s.ecgDesconectado && s.estadoSpo2 != 0) {
             nuevoLatidoPA(idx, ppgDC, pirSpo2);
           }
@@ -762,6 +877,10 @@ void tareaProc(void* arg) {
 
       case MSG_PPG: {
         float voltios = m.v;
+
+        // [FR] muestra cruda en cuentas (conserva la línea base respiratoria)
+        frAlimentarPpg(voltios / FACTOR_VOLT, m.a != 0);
+
         if (!hayPpg) {
           biquadPrime(&ppgLP1, voltios);
           biquadPrime(&ppgLP2, voltios);
@@ -796,7 +915,6 @@ void tareaProc(void* arg) {
           iniciarPTPpg();
           tPpgIni = false;
           s.pr = 0;
-          // Al poner el dedo: se recalibra la PA con la última referencia
           Rprev = 0;
           iniciarCalibracion(SBP0, DBP0);
         }
@@ -813,7 +931,7 @@ void tareaProc(void* arg) {
         break;
     }
 
-    // Una vez por segundo: FC, PR, PA y comandos de calibración
+    // Una vez por segundo: FC, PR, PA, FR y comandos de calibración
     TickType_t ahora = xTaskGetTickCount();
     if (ahora - tInfo >= pdMS_TO_TICKS(PERIODO_INFO_MS)) {
       tInfo = ahora;
@@ -827,7 +945,7 @@ void tareaProc(void* arg) {
       // ---- FC (ECG) ----
       bool sinLatidoEcg = (ahora - tUltLatEcg) > pdMS_TO_TICKS(TIMEOUT_LATIDO_MS);
       if (s.ecgDesconectado || sinLatidoEcg) {
-        if (s.fc != 0) { s.fc = 0; iniciarPTEcg(); }    // reaprende cuando vuelva
+        if (s.fc != 0) { s.fc = 0; iniciarPTEcg(); }
       } else {
         int bpmEcg = (int)(pt_bpm(&ptEcg) + 0.5f);
         if (bpmEcg >= 40 && bpmEcg <= 220) s.fc = bpmEcg;
@@ -847,14 +965,15 @@ void tareaProc(void* arg) {
         s.sbp = 0;
         s.dbp = 0;
       } else {
-        s.sbp = (sbpEstable > 0) ? sbpEstable : (int)SBP0;   // base mientras arranca
+        s.sbp = (sbpEstable > 0) ? sbpEstable : (int)SBP0;
         s.dbp = (dbpEstable > 0) ? dbpEstable : (int)DBP0;
       }
-      // Para NEWS2 solo cuenta la PA realmente calculada, no la base
       s.pas = (s.sbp > 0 && sbpEstable > 0) ? sbpEstable : -1;
 
-      // ---- Pendientes: se llenarán con sus sensores ----
-      s.fr   = -1;
+      // ---- [FR] Frecuencia respiratoria estimada ----
+      frActualizarSignos(s);
+
+      // ---- Pendiente: se llenará con su sensor ----
       s.temp = -1.0f;
 
       xQueueOverwrite(buzonSignos, &s);
@@ -915,15 +1034,22 @@ void tareaDisplay(void* arg) {
         xQueuePeek(buzonSignos, &s, 0) == pdPASS) {
       nexNumero("nHR", s.fc);
 #if CALIBRAR_LOFF
-      nexNumero("nPR",   s.calPpUv);      // pico a pico ECG cruda (µV)
-      nexNumero("nSpO2", s.calMediaMv);   // promedio ECG cruda (mV)
+      nexNumero("nPR",   s.calPpUv);
+      nexNumero("nSpO2", s.calMediaMv);
 #else
       nexNumero("nPR",   s.pr);
       nexNumero("nSpO2", s.spo2);
 #endif
       nexNumero("nSBP", s.sbp);
       nexNumero("nDBP", s.dbp);
-      // (siguiente paso: nivel de alarma y alarmas técnicas en la Nextion)
+
+      // [FR] 0 en pantalla = todavía sin valor fiable
+      nexNumero(NEX_OBJ_FR, (s.fr > 0) ? s.fr : 0);
+#if USAR_TEXTO_ESTADO_FR
+      char b[40];
+      snprintf(b, sizeof(b), "%s.txt=\"%s\"", NEX_OBJ_FR_TXT, textoEstadoFR(s.frEstado));
+      nexComando(b);
+#endif
     }
 
     leerComandosSerial();
@@ -940,9 +1066,9 @@ EntradaNews2 entradaSimulada() {
   static uint32_t seg = 0;
   uint8_t fase = (seg++ / 20) % 4;
   EntradaNews2 e = {16, 98, false, -1, 75, true, 36.8f, true, true};
-  if (fase == 1) { e.pulso = 135; }                              // un 3    -> MEDIA
-  if (fase == 2) { e.pulso = 115; e.spo2 = 93; e.fr = 22; }      // total 6 -> MEDIA
-  if (fase == 3) { e.pulso = 135; e.spo2 = 90; e.fr = 26; }      // total 9 -> ALTA
+  if (fase == 1) { e.pulso = 135; }
+  if (fase == 2) { e.pulso = 115; e.spo2 = 93; e.fr = 22; }
+  if (fase == 3) { e.pulso = 135; e.spo2 = 90; e.fr = 26; }
   return e;
 }
 #endif
@@ -968,7 +1094,11 @@ void tareaAlarma(void* arg) {
     if (!haySignos) continue;
 
     EntradaNews2 e;
-    e.fr    = s.fr;
+#if USAR_FR_EN_NEWS2
+    e.fr    = s.fr;                 // [FR] -1 si no hay estimación fiable
+#else
+    e.fr    = -1;
+#endif
     e.spo2  = (s.estadoSpo2 == 2) ? s.spo2 : -1;
 #if USAR_PAS_EN_NEWS2
     e.pas   = s.pas;
@@ -1087,6 +1217,9 @@ void tareaSonido(void* arg) {
 
 void setup() {
   Serial.begin(NEX_BAUD);
+#if DEBUG_FR_SERIAL1
+  Serial1.begin(115200, SERIAL_8N1, -1, DEBUG_TX_PIN);   // [FR] solo TX, adaptador USB-TTL aparte
+#endif
 
   ledcAttach(PIN_BUZZER, BUZZER_FREQ_HZ, 8);
   ledcWriteTone(PIN_BUZZER, 0);
@@ -1110,11 +1243,11 @@ void setup() {
   delay(50);
 
   // Tareas            función        nombre  stack  par  prio handle núcleo
-  xTaskCreatePinnedToCore(tareaProc,    "proc", 8192, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(tareaAdq,     "adq",  4096, NULL, 5, NULL, 1);
-  xTaskCreatePinnedToCore(tareaSonido,  "son",  2048, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(tareaDisplay, "disp", 4096, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(tareaAlarma,  "alm",  4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(tareaProc,    "proc", 10240, NULL, 3, NULL, 1);   // [FR] +2 KB
+  xTaskCreatePinnedToCore(tareaAdq,     "adq",  4096,  NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(tareaSonido,  "son",  2048,  NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(tareaDisplay, "disp", 4096,  NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(tareaAlarma,  "alm",  4096,  NULL, 1, NULL, 0);
 
   afe.enableCapture();
 }
