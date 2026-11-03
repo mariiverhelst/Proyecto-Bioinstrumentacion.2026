@@ -8,18 +8,20 @@
 // ============================================================
 // Sonido: ÚNICO dueño del buzzer
 //   Prioridad: ALTA > MEDIA > TÉCNICA > bip de pulso
+//   Con USAR_BUZZER = 0 el transistor queda siempre apagado.
 // ============================================================
 
 class Sonido {
  public:
-  void begin();                       // configura el PWM del buzzer (llamar en setup)
-  void bucle();                       // lazo infinito de la tarea
-  static void tarea(void* param);     // función para xTaskCreatePinnedToCore
+  void begin();
+  void bucle();
+  static void tarea(void* param);
 
  private:
+  void       tono(uint16_t freq);
   ModoSonido modoActual();
-  void reproducir(const Paso* patron, size_t n, ModoSonido modo);
-  void bipPulso();
+  void       reproducir(const Paso* patron, size_t n, ModoSonido modo);
+  void       bipPulso();
 };
 
 #endif // SONIDO_H

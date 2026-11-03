@@ -5,10 +5,6 @@ void Procesamiento::tarea(void* param) {
   static_cast<Procesamiento*>(param)->bucle();
 }
 
-// ============================================================
-// Inicialización (se llama al inicio de la tarea)
-// ============================================================
-
 void Procesamiento::inicializar() {
   biquad_lowpass (&ecgLP1, FS_ECG_HZ, ECG_FC_HZ,    ECG_Q);
   biquad_lowpass (&ecgLP2, FS_ECG_HZ, ECG_FC_HZ,    ECG_Q);
@@ -22,7 +18,6 @@ void Procesamiento::inicializar() {
 
   iniciarPTEcg();
   iniciarPTPpg();
-
   tInfo = xTaskGetTickCount();
 }
 
@@ -40,18 +35,16 @@ void Procesamiento::iniciarPTPpg() {
 
 void Procesamiento::enviarPunto(uint8_t id, float v) {
   PuntoGraf p = {id, v};
-  xQueueSendToBack(colaGraf, &p, 0);   // si la Nextion se atrasa, se descarta el punto
+  xQueueSendToBack(colaGraf, &p, 0);
 }
 
-// ============================================================
-// Muestra de ECG (500 Hz)
-// ============================================================
+// ---------------- ECG (500 Hz) ----------------
 
 void Procesamiento::procesarEcg(float voltios, bool saturada) {
   // FR: muestra cruda en cuentas (antes de cualquier filtro visual)
   frAlimentarEcg(voltios / FACTOR_VOLT, saturada);
 
-  if (!hayEcg) {                       // arranque de los filtros en régimen permanente
+  if (!hayEcg) {
     biquadPrime(&ecgLP1, voltios);
     biquadPrime(&ecgLP2, voltios);
     biquadPrimeHP(&ecgHP, voltios);
@@ -60,32 +53,33 @@ void Procesamiento::procesarEcg(float voltios, bool saturada) {
   float filtrada = biquad_process(&ecgLP2, biquad_process(&ecgLP1, voltios));
   float grafica  = biquad_process(&ecgHP, filtrada);
 
-  if (++decimEcg >= DECIM_ECG) {       // 500 Hz -> 100 Hz
+  if (++decimEcg >= DECIM_ECG) {
     decimEcg = 0;
+#if MOSTRAR_ECG_PLANO
+    enviarPunto(ID_WAVE_ECG, ecgPlano ? 0.0f : grafica);
+#else
     enviarPunto(ID_WAVE_ECG, grafica);
+#endif
   }
 
   if (!tEcgIni) { tiempoEcgUs = micros(); tEcgIni = true; }
   else          { tiempoEcgUs += PERIODO_ECG_US; }
 
-  // Presión arterial: guarda la muestra junto con la última PPG
   uint32_t idx = presion.agregarMuestra(grafica, ppgGraficaUlt, ppgFiltradaUlt);
 
-  // Pan-Tompkins ECG: latido nuevo cuando sube el contador
   pt_process_t(&ptEcg, voltios * PT_CUENTAS_POR_V_ECG, tiempoEcgUs);
-  uint32_t bE = pt_beats(&ptEcg);
-  if (bE != beatsEcgPrev) {
-    beatsEcgPrev = bE;
+  uint32_t b = pt_beats(&ptEcg);
+  if (b != beatsEcgPrev) {
+    beatsEcgPrev = b;
     tUltLatEcg = xTaskGetTickCount();
-    if (s.estadoSpo2 == 2) {           // PA: solo con SpO2 válida
+    ecgPlano = false;
+    if (s.estadoSpo2 == 2) {
       presion.nuevoLatido(idx, ppgDC, pirSpo2);
     }
   }
 }
 
-// ============================================================
-// Muestra de PPG (250 Hz)
-// ============================================================
+// ---------------- PPG (250 Hz) ----------------
 
 void Procesamiento::procesarPpg(float voltios, bool saturada) {
   // FR: muestra cruda en cuentas (conserva la línea base respiratoria)
@@ -104,109 +98,106 @@ void Procesamiento::procesarPpg(float voltios, bool saturada) {
   ppgGraficaUlt  = grafica;
   ppgFiltradaUlt = filtrada;
 
-  acumPpg += PPG_PASO;                 // 250 Hz -> 100 Hz
+  acumPpg += PPG_PASO;
   if (acumPpg >= PPG_DIVISOR) {
     acumPpg -= PPG_DIVISOR;
-    enviarPunto(ID_WAVE_PPG, grafica);
+    enviarPunto(ID_WAVE_PPG, (s.estadoSpo2 != 0) ? grafica : 0.0f);   // sin sensor: línea recta
   }
 
-  ppgDC += kDC * (filtrada - ppgDC);   // seguidor lento del offset
+  ppgDC += kDC * (filtrada - ppgDC);
 
   if (!tPpgIni) { tiempoPpgUs = micros(); tPpgIni = true; }
   else          { tiempoPpgUs += PERIODO_PPG_US; }
 
   pt_process_t(&ptPpg, (filtrada - ppgDC) * PT_CUENTAS_POR_V_PPG, tiempoPpgUs);
-  uint32_t bP = pt_beats(&ptPpg);
-  if (bP != beatsPpgPrev) {
-    beatsPpgPrev = bP;
+  uint32_t b = pt_beats(&ptPpg);
+  if (b != beatsPpgPrev) {
+    beatsPpgPrev = b;
     tUltLatPpg = xTaskGetTickCount();
   }
 }
 
-// ============================================================
-// Estado del sensor de SpO2 (1 vez por segundo desde Adquisicion)
-// ============================================================
+// ---------------- Estado del sensor de SpO2 ----------------
 
 void Procesamiento::procesarEstadoSpo2(uint8_t estado) {
   TickType_t tAhora = xTaskGetTickCount();
-  if (estadoLib != 0 && estado == 0) tPpgAusente = tAhora;      // se fue el sensor
+  if (estadoLib != 0 && estado == 0) tPpgAusente = tAhora;
 
-  // Reiniciar solo si el sensor estuvo ausente un tiempo real (no por un parpadeo)
   if (estadoLib == 0 && estado != 0 &&
       (tAhora - tPpgAusente) > pdMS_TO_TICKS(PPG_REINICIO_MS)) {
     iniciarPTPpg();
     tPpgIni = false;
-    presion.reiniciar();                // recalibra la PA con la última referencia
+    tReinicioPpg = tAhora;
+    presion.reiniciar();                          // recalibra la PA con la última referencia
   }
 
   estadoLib = estado;
   s.estadoSpo2 = sinPulso ? 0 : estadoLib;
-  if (s.estadoSpo2 != 2) { s.spo2 = 0; s.pr = 0; }
+  if (s.estadoSpo2 != 2) s.spo2 = 0;
+  if (s.estadoSpo2 == 0) s.pr = 0;
 }
 
-// ============================================================
-// Una vez por segundo: FC, PR, estado SpO2, PA, FR, comando CAL
-// ============================================================
+// ---------------- Una vez por segundo ----------------
 
 void Procesamiento::cadaSegundo(TickType_t ahora) {
-  // ---- Calibración PA pedida desde la pantalla ----
+  // ---- Calibración de PA ----
   CalPA cal;
   if (xQueueReceive(colaCal, &cal, 0) == pdPASS) {
     presion.calibrar(cal.sbp, cal.dbp);
   }
 
   // ---- FC (ECG) ----
-  bool sinLatidoEcg = USAR_TIMEOUT_LATIDO &&
-                      (ahora - tUltLatEcg) > pdMS_TO_TICKS(TIMEOUT_LATIDO_MS);
+  bool sinLatidoEcg = (ahora - tUltLatEcg) > pdMS_TO_TICKS(TIMEOUT_LATIDO_MS);
+  ecgPlano = sinLatidoEcg;
   if (sinLatidoEcg) {
-    s.fc = 0;                                          // se oculta mientras falte el ECG
+    s.fc = 0;
     if (!ecgPerdido) {
       ecgPerdido = true;
       tEcgPerdido = ahora;
-    } else if (!ecgReiniciado &&
-               (ahora - tEcgPerdido) > pdMS_TO_TICKS(ECG_REINICIO_MS)) {
-      iniciarPTEcg();                                  // ausencia larga: reaprender
+    } else if (!ecgReiniciado && (ahora - tEcgPerdido) > pdMS_TO_TICKS(ECG_REINICIO_MS)) {
+      iniciarPTEcg();
       ecgReiniciado = true;
     }
   } else {
     ecgPerdido = false;
     ecgReiniciado = false;
-    int bpmEcg = (int)(pt_bpm(&ptEcg) + 0.5f);
-    if (bpmEcg >= 40 && bpmEcg <= 220) s.fc = bpmEcg;
+    int bpm = (int)(pt_bpm(&ptEcg) + 0.5f);
+    if (bpm >= 40 && bpm <= 220) s.fc = bpm;
   }
 
-  // ---- PR interno: con sensor colocado (estado 1 o 2) ----
-  bool sinLatidoPpg = USAR_TIMEOUT_LATIDO &&
-                      (ahora - tUltLatPpg) > pdMS_TO_TICKS(TIMEOUT_LATIDO_MS);
+  // ---- PR (PPG) ----
+  bool sinLatidoPpg = (ahora - tUltLatPpg) > pdMS_TO_TICKS(TIMEOUT_LATIDO_MS);
   int prInterno = 0;
-  if (estadoLib != 0 && !sinLatidoPpg) {
-    int bpmPpg = (int)(pt_bpm(&ptPpg) + 0.5f);
-    if (bpmPpg >= 40 && bpmPpg <= 220) prInterno = bpmPpg;
+  if (sinLatidoPpg) {
+    if ((ahora - tReinicioPpg) > pdMS_TO_TICKS(PPG_REAPRENDER_MS)) {
+      iniciarPTPpg();
+      tPpgIni = false;
+      tReinicioPpg = ahora;
+    }
+  } else {
+    int bpm = (int)(pt_bpm(&ptPpg) + 0.5f);
+    if (bpm >= 40 && bpm <= 220) prInterno = bpm;
   }
 
-  // ---- Sin pulsos en la PPG durante 4 s = no hay dedo ----
+  // ---- Estado del sensor ----
   sinPulso = (estadoLib == 2) && sinLatidoPpg;
 
   s.estadoSpo2 = sinPulso ? 0 : estadoLib;
-  s.pr   = (s.estadoSpo2 != 0) ? prInterno : 0;   // PR desde que se detecta el dedo
-  s.spo2 = (s.estadoSpo2 == 2) ? spo2Lib   : 0;   // SpO2 solo con señal válida
+  s.pr   = (s.estadoSpo2 != 0) ? prInterno : 0;
+  s.spo2 = (s.estadoSpo2 == 2) ? spo2Lib   : 0;
 
-  // ---- Presión arterial (necesita ECG y PPG válidas) ----
+  // ---- Presión arterial ----
   if (s.estadoSpo2 != 2 || s.fc == 0) {
     s.sbp = 0;
     s.dbp = 0;
   } else {
-    s.sbp = presion.sistolica();          // base mientras arranca
+    s.sbp = presion.sistolica();
     s.dbp = presion.diastolica();
   }
-  // Para NEWS2 solo cuenta la PA realmente calculada, no la base
   s.pas = (s.sbp > 0 && presion.calculada()) ? presion.sistolica() : -1;
 
-  // ---- Frecuencia respiratoria estimada ----
+  // ---- Frecuencia respiratoria ----
   frActualizar();
-
-  // ---- Temperatura: aquí se asignará s.temp cuando exista el sensor ----
-  s.temp = -1.0f;
 
   xQueueOverwrite(buzonSignos, &s);
 }
@@ -215,7 +206,6 @@ void Procesamiento::cadaSegundo(TickType_t ahora) {
 // Frecuencia respiratoria
 // ============================================================
 
-// Mide la tasa real de ECG (el AFE usa reloj interno) y luego alimenta el estimador
 void Procesamiento::frAlimentarEcg(float cuentas, bool saturada) {
   if (frDeshabilitado) return;
 
@@ -226,10 +216,10 @@ void Procesamiento::frAlimentarEcg(float cuentas, bool saturada) {
     if (dt >= FR_CAL_MS * 1000UL) {
       float fsMedida = (float)frCalMuestras * 1.0e6f / (float)dt;
       if (fsMedida < 0.8f * FS_ECG_HZ || fsMedida > 1.25f * FS_ECG_HZ) {
-        frDeshabilitado = true;         // el AFE no está en 500 Hz / ECG,ECG,PPG
+        frDeshabilitado = true;
         return;
       }
-      frEst.begin(fsMedida, 2);         // 2 muestras de ECG por cada muestra de PPG
+      frEst.begin(fsMedida, 2);
       frCalibrando = false;
       frTbInicioUs = micros();
       frTbMuestras = 0;
@@ -240,7 +230,6 @@ void Procesamiento::frAlimentarEcg(float cuentas, bool saturada) {
   frTbMuestras++;
   bool nuevaVentana = frEst.pushEcg(cuentas, saturada);
 
-  // Cada 20 s se corrige la deriva lenta del reloj del AFE
   uint32_t dt = micros() - frTbInicioUs;
   if (dt >= 20000000UL) {
     frEst.setTimeBase((float)frTbMuestras * 1.0e6f / (float)dt);
@@ -268,7 +257,6 @@ void Procesamiento::frAlimentarPpg(float cuentas, bool saturada) {
   if (!frCalibrando && !frDeshabilitado) frEst.pushPpg(cuentas, saturada);
 }
 
-// Llena s.fr (-1 = sin valor) y s.frEstado
 void Procesamiento::frActualizar() {
   if (frDeshabilitado) { s.fr = -1; s.frEstado = FR_EST_CONFIG;    return; }
   if (frCalibrando)    { s.fr = -1; s.frEstado = FR_EST_CAL_RELOJ; return; }
@@ -285,21 +273,17 @@ void Procesamiento::frActualizar() {
 void Procesamiento::bucle() {
   inicializar();
   Msg m;
-
   for (;;) {
-    xQueueReceive(colaMsg, &m, portMAX_DELAY);       // duerme si no hay datos
+    xQueueReceive(colaMsg, &m, portMAX_DELAY);
 
     switch (m.tipo) {
-      case MSG_ECG:         procesarEcg(m.v, m.a != 0);  break;
-      case MSG_PPG:         procesarPpg(m.v, m.a != 0);  break;
-      case MSG_ESTADO_SPO2: procesarEstadoSpo2(m.a);     break;
-
+      case MSG_ECG:         procesarEcg(m.v, m.a != 0); break;
+      case MSG_PPG:         procesarPpg(m.v, m.a != 0); break;
+      case MSG_ESTADO_SPO2: procesarEstadoSpo2(m.a);    break;
       case MSG_SPO2:
         spo2Lib = m.a;
         s.spo2 = (s.estadoSpo2 == 2) ? spo2Lib : 0;
-        xQueueOverwrite(buzonSignos, &s);
         break;
-
       case MSG_PIR:     pirSpo2        = m.v;                  break;
       case MSG_CAL_R:   s.calR100      = (int)(m.v * 100.0f);  break;
       case MSG_CAL_PI:  s.calPi100     = (int)(m.v * 100.0f);  break;

@@ -5,9 +5,7 @@ void GestorAlarmas::tarea(void* param) {
   static_cast<GestorAlarmas*>(param)->bucle();
 }
 
-// ============================================================
-// Puntajes NEWS2 (escala 1 de SpO2)
-// ============================================================
+// ---------------- Puntajes NEWS2 (escala 1 de SpO2) ----------------
 
 int GestorAlarmas::puntajeFR(int fr) {
   if (fr < 0)   return -1;
@@ -67,7 +65,7 @@ EstadoAlarma GestorAlarmas::calcularNews2(const EntradaNews2& e) {
 
   EstadoAlarma a = {0, ALARMA_BAJA, false, 0, false};
   for (int i = 0; i < 7; i++) {
-    if (p[i] < 0) continue;            // parámetro no disponible
+    if (p[i] < 0) continue;
     a.news2 += p[i];
     a.parametros++;
     if (p[i] == 3) a.algunTres = true;
@@ -79,33 +77,27 @@ EstadoAlarma GestorAlarmas::calcularNews2(const EntradaNews2& e) {
   return a;
 }
 
-// ============================================================
-// Entrada del NEWS2: real o simulada
-// ============================================================
+// ---------------- Entrada: real o simulada ----------------
 
 EntradaNews2 GestorAlarmas::armarEntrada(const Signos& s) {
   EntradaNews2 e;
 #if USAR_FR_EN_NEWS2
-  e.fr    = s.fr;                      // -1 si no hay estimación fiable
+  e.fr = s.fr;                           // -1 si no hay estimación fiable
 #else
-  e.fr    = -1;
+  e.fr = -1;
 #endif
-  e.spo2  = (s.estadoSpo2 == 2) ? s.spo2 : -1;
+  e.spo2 = (s.estadoSpo2 == 2) ? s.spo2 : -1;
 #if USAR_PAS_EN_NEWS2
-  e.pas   = s.pas;
+  e.pas = s.pas;                         // -1 si no hay PA calculada
 #else
-  e.pas   = -1;
+  e.pas = -1;
 #endif
   e.pulso = (s.fc > 0) ? s.fc : (s.pr > 0 ? s.pr : -1);
-#if USAR_TEMP_EN_NEWS2
-  e.temp  = s.temp;
-#else
-  e.temp  = -1.0f;
-#endif
+  e.temp  = -1.0f;                       // sensor pendiente
   e.o2Suplementario    = false;
-  e.o2Conocido         = false;        // sin entrada manual
+  e.o2Conocido         = false;          // sin entrada manual
   e.alerta             = true;
-  e.concienciaConocida = false;        // sin entrada manual
+  e.concienciaConocida = false;          // sin entrada manual
   return e;
 }
 
@@ -113,15 +105,13 @@ EntradaNews2 GestorAlarmas::armarEntrada(const Signos& s) {
 EntradaNews2 GestorAlarmas::entradaSimulada() {
   uint8_t fase = (segSimulacion++ / 20) % 4;
   EntradaNews2 e = {16, 98, false, 120, 75, true, 36.8f, true, true};
-  if (fase == 1) { e.pulso = 135; }                              // pulso 3       -> MEDIA
-  if (fase == 2) { e.pulso = 115; e.spo2 = 93; e.fr = 22; }      // 2 + 2 + 2 = 6 -> MEDIA
-  if (fase == 3) { e.pulso = 135; e.spo2 = 90; e.fr = 26; }      // 3 + 3 + 3 = 9 -> ALTA
+  if (fase == 1) { e.pulso = 135; }
+  if (fase == 2) { e.pulso = 115; e.spo2 = 93; e.fr = 22; }
+  if (fase == 3) { e.pulso = 135; e.spo2 = 90; e.fr = 26; }
   return e;
 }
 
-// ============================================================
-// Persistencia: el nivel solo cambia si se sostiene
-// ============================================================
+// ---------------- Persistencia ----------------
 
 NivelAlarma GestorAlarmas::aplicarPersistencia(NivelAlarma nuevo) {
   if (nuevo == nivelActual) {
@@ -135,12 +125,10 @@ NivelAlarma GestorAlarmas::aplicarPersistencia(NivelAlarma nuevo) {
   return nivelActual;
 }
 
-// ============================================================
-// Alarma técnica: sensor de SpO2 retirado (solo si estuvo en uso)
-// ============================================================
+// ---------------- Alarma técnica: sensor de SpO2 retirado ----------------
 
 void GestorAlarmas::alarmaTecnica(const Signos& s, EstadoAlarma& a) {
-  if (s.estadoSpo2 == 2) spo2EnUso = true;
+  if (s.estadoSpo2 == 2) spo2EnUso = true;          // solo si estuvo en uso
 
   bool cond = spo2EnUso && (s.estadoSpo2 == 0);
   segTecSpo2 = cond ? (segTecSpo2 < 255 ? segTecSpo2 + 1 : 255) : 0;
@@ -148,9 +136,7 @@ void GestorAlarmas::alarmaTecnica(const Signos& s, EstadoAlarma& a) {
   a.tecSpo2 = segTecSpo2 >= TECNICA_SEG;
 }
 
-// ============================================================
-// Lazo de la tarea (núcleo 0, prio 1)
-// ============================================================
+// ---------------- Lazo de la tarea (núcleo 0, prio 1) ----------------
 
 void GestorAlarmas::bucle() {
   TickType_t tUlt = xTaskGetTickCount();
@@ -165,7 +151,6 @@ void GestorAlarmas::bucle() {
     a.tecSpo2 = false;
 #else
     if (xQueuePeek(buzonSignos, &s, 0) != pdPASS) continue;
-
     EstadoAlarma a = calcularNews2(armarEntrada(s));
     a.nivel = aplicarPersistencia(a.nivel);
     alarmaTecnica(s, a);

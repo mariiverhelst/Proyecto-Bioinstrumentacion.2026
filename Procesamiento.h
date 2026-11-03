@@ -10,12 +10,7 @@
 #include "PresionArterial.h"
 
 // ============================================================
-// Procesamiento: recibe las muestras de Adquisicion y calcula todo
-//   - Filtros visuales y puntos de las gráficas (decimados a 100 Hz)
-//   - Pan-Tompkins ECG (FC) y PPG (PR), con caída a 0 sin latidos
-//   - Estado efectivo de SpO2 (sin pulso = sin sensor)
-//   - Alimenta PresionArterial y el estimador de FR
-//   - Publica los signos en buzonSignos una vez por segundo
+// Procesamiento: filtros, gráficas, FC, PR, SpO2, PA y FR
 //
 // IMPORTANTE: el objeto ocupa ~15 KB (estimador de FR), debe ser GLOBAL.
 // ============================================================
@@ -24,15 +19,14 @@ class Procesamiento {
  public:
   explicit Procesamiento(PresionArterial& pa) : presion(pa) {}
 
-  void bucle();                       // lazo infinito de la tarea
-  static void tarea(void* param);     // función para xTaskCreatePinnedToCore
+  void bucle();
+  static void tarea(void* param);
 
  private:
   void inicializar();
   void iniciarPTEcg();
   void iniciarPTPpg();
   void enviarPunto(uint8_t id, float v);
-
   void procesarEcg(float voltios, bool saturada);
   void procesarPpg(float voltios, bool saturada);
   void procesarEstadoSpo2(uint8_t estado);
@@ -45,40 +39,45 @@ class Procesamiento {
 
   PresionArterial& presion;
 
-  // --- filtros y detectores ---
-  PanTompkins ptEcg, ptPpg;
+  // --- ECG ---
+  PanTompkins ptEcg;
   Biquad ecgLP1, ecgLP2, ecgHP;
-  Biquad ppgLP1, ppgLP2, ppgHP;
-  float kDC = 0.0f;
-  float ppgDC = 0.0f;
-  uint32_t beatsEcgPrev = 0, beatsPpgPrev = 0;
+  bool     hayEcg = false;
+  uint8_t  decimEcg = 0;
+  uint32_t tiempoEcgUs = 0;
+  bool     tEcgIni = false;
+  uint32_t beatsEcgPrev = 0;
+  bool     ecgPlano = true;
 
-  uint32_t tiempoEcgUs = 0, tiempoPpgUs = 0;
-  bool tEcgIni = false, tPpgIni = false;
-  bool hayEcg = false, hayPpg = false;
-  uint8_t decimEcg = 0;
-  uint8_t acumPpg  = 0;
+  // --- PPG ---
+  PanTompkins ptPpg;
+  Biquad ppgLP1, ppgLP2, ppgHP;
+  bool     hayPpg = false;
+  uint8_t  acumPpg = 0;
+  float    kDC = 0.0f, ppgDC = 0.0f;
+  uint32_t tiempoPpgUs = 0;
+  bool     tPpgIni = false;
+  uint32_t beatsPpgPrev = 0;
 
   // --- últimos valores de PPG (para la PA) ---
   float ppgGraficaUlt  = 0.0f;
   float ppgFiltradaUlt = 0.0f;
   float pirSpo2        = 0.0f;
 
-  // --- tiempos de latidos ---
-  TickType_t tUltLatEcg  = 0;
-  TickType_t tUltLatPpg  = 0;
-  TickType_t tPpgAusente = 0;
-  TickType_t tInfo       = 0;
-
-  // --- ECG ausente (reinicio del Pan-Tompkins solo si es largo) ---
+  // --- tiempos ---
+  TickType_t tUltLatEcg    = 0;
+  TickType_t tUltLatPpg    = 0;
+  TickType_t tInfo         = 0;
   TickType_t tEcgPerdido   = 0;
   bool       ecgPerdido    = false;
   bool       ecgReiniciado = false;
+  TickType_t tReinicioPpg  = 0;
+  TickType_t tPpgAusente   = 0;
 
-  // --- estado de SpO2 ---
-  uint8_t estadoLib = 0;      // estado efectivo recibido de Adquisicion
+  // --- SpO2 ---
+  uint8_t estadoLib = 0;
   int     spo2Lib   = 0;
-  bool    sinPulso  = false;  // sin pulsos en la PPG aunque la librería diga "válida"
+  bool    sinPulso  = false;
 
   // --- frecuencia respiratoria ---
   RespRate::Estimator frEst;
@@ -87,8 +86,7 @@ class Procesamiento {
   uint32_t frCalInicioUs = 0, frCalMuestras = 0;
   uint32_t frTbInicioUs  = 0, frTbMuestras  = 0;
 
-  // --- signos publicados ---
-  Signos s = {0, 0, 0, 0, -1, -1.0f, -1, 0, 0, 0, 0, 0, 0, FR_EST_CAL_RELOJ};
+  Signos s = {0, 0, 0, 0, 0, 0, -1, -1, FR_EST_CAL_RELOJ, 0, 0, 0, 0};
 };
 
 #endif // PROCESAMIENTO_H

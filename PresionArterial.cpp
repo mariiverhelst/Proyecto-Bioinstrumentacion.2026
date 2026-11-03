@@ -1,9 +1,5 @@
 #include "PresionArterial.h"
 
-// ============================================================
-// Buffers circulares a 500 Hz
-// ============================================================
-
 uint32_t PresionArterial::agregarMuestra(float ecgGrafica, float ppgGrafica, float ppgFiltrada) {
   uint32_t idx = nMuestras;
   B(ecgBuf, idx) = INVERTIR_ECG ? -ecgGrafica : ecgGrafica;
@@ -12,10 +8,6 @@ uint32_t PresionArterial::agregarMuestra(float ecgGrafica, float ppgGrafica, flo
   nMuestras = idx + 1;
   return idx;
 }
-
-// ============================================================
-// Calibración
-// ============================================================
 
 void PresionArterial::calibrar(float sbp, float dbp) {
   SBP0 = sbp;
@@ -36,7 +28,7 @@ void PresionArterial::acumularCalibracion(float ptt, float pir) {
   sumPtt += ptt;
   sumPir += pir;
   nCal++;
-  PTT0 = sumPtt / nCal;      // se actualiza progresivamente
+  PTT0 = sumPtt / nCal;
   PIR0 = sumPir / nCal;
   if (nCal >= N_CAL) {
     calibrando = false;
@@ -44,10 +36,7 @@ void PresionArterial::acumularCalibracion(float ptt, float pir) {
   }
 }
 
-// ============================================================
-// Ubicar el pico R alrededor del latido detectado
-// ============================================================
-
+// Ubica el pico R alrededor del latido detectado por el Pan-Tompkins
 void PresionArterial::nuevoLatido(uint32_t m, float ppgDC, float pirSpo2) {
   if (m < MS(500)) return;
   uint32_t ini = m - MS(400);
@@ -62,17 +51,14 @@ void PresionArterial::nuevoLatido(uint32_t m, float ppgDC, float pirSpo2) {
   Rprev = R;
 }
 
-// ============================================================
 // PTT y PIR de un latido
-// ============================================================
-
 void PresionArterial::procesarLatido(uint32_t R, uint32_t Rsig, float ppgDC, float pirSpo2) {
   if (Rsig <= R || (Rsig - R) >= N_BUF - 10) return;
 
   float rr = (Rsig - R) * 1000.0f / FS_PA;
   if (rr < 300.0f || rr > 2200.0f) return;
 
-  // Frente más pronunciado del PPG en [R + 80 ms, R + 600 ms]
+  // Frente más pronunciado del PPG (subida o bajada) en [R + 80 ms, R + 600 ms]
   uint32_t iniBusqueda = R + MS(80);
   uint32_t fin = R + MS(600);
   if (fin > Rsig) fin = Rsig;
@@ -91,14 +77,12 @@ void PresionArterial::procesarLatido(uint32_t R, uint32_t Rsig, float ppgDC, flo
   float mejor = (mejorSubida >= mejorBajada) ? mejorSubida : mejorBajada;
   if (mejor <= 1e-7f) return;
 
-  // PTT en ms
   float ptt = (k - R) * 1000.0f / FS_PA;
 
-  // PIR
   float pir = 1.02f;
 #if USAR_PIR
   if (pirSpo2 > 0.0f) {
-    pir = pirSpo2;                         // calculado en Adquisicion con acIr / dcIr
+    pir = pirSpo2;
   } else {
     float maxPpg = -1e9f, minPpg = 1e9f;
     uint32_t finL = k + MS(300);
@@ -117,10 +101,6 @@ void PresionArterial::procesarLatido(uint32_t R, uint32_t Rsig, float ppgDC, flo
 
   revisarYPromediar(ptt, pir);
 }
-
-// ============================================================
-// Revisar y promediar
-// ============================================================
 
 void PresionArterial::revisarYPromediar(float ptt, float pir) {
   if (ptt < 80.0f || ptt > 550.0f) return;
@@ -141,10 +121,7 @@ void PresionArterial::revisarYPromediar(float ptt, float pir) {
   calcular(pttProm, pirProm);
 }
 
-// ============================================================
 // Modelo de presión (Ding et al., 2017)
-// ============================================================
-
 void PresionArterial::calcular(float ptt, float pir) {
   if (ptt <= 1.0f || pir <= 0.0f || PTT0 <= 1.0f || PIR0 <= 0.0f) return;
 

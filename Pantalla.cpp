@@ -2,9 +2,7 @@
 #include "Colas.h"
 #include "RespRateEstimator.h"
 
-// ------------------------------------------------------------
 // Texto del estado de la FR (solo se usa si USAR_TEXTO_ESTADO_FR = 1)
-// ------------------------------------------------------------
 static const char* textoEstadoFR(uint8_t e) {
   switch (e) {
     case FR_EST_CAL_RELOJ:        return "calentando";
@@ -18,16 +16,12 @@ static const char* textoEstadoFR(uint8_t e) {
   }
 }
 
-// ============================================================
-// Inicialización
-// ============================================================
-
 void Pantalla::begin() {
   comando("page 0");
   delay(50);
   comando("cle 1,0");
   comando("cle 2,0");
-  comando("vNivel.val=0");          // barras en azul al arrancar
+  comando("vNivel.val=0");                 // barras en azul al arrancar
   delay(50);
 }
 
@@ -35,9 +29,7 @@ void Pantalla::tarea(void* param) {
   static_cast<Pantalla*>(param)->bucle();
 }
 
-// ============================================================
-// Comandos Nextion (SIN espacios dentro de los parámetros)
-// ============================================================
+// ---------------- Comandos Nextion (SIN espacios en los parámetros) ----------------
 
 void Pantalla::enviar(char* buffer, int longitud) {
   buffer[longitud++] = 0xFF;
@@ -64,17 +56,13 @@ void Pantalla::numero(const char* objeto, int valor) {
   enviar(buffer, longitud);
 }
 
-// ============================================================
-// Autoescalado (solo visual)
-// ============================================================
+// ---------------- Autoescalado ----------------
 
 uint8_t Pantalla::escalar(EscalaAutomatica& escala, float valor, float spanMinimo, bool invertir) {
   float a = fabsf(valor);
-
   if (a > escala.bloqueMaximo) escala.bloqueMaximo = a;
   escala.cantidad++;
 
-  // Arranque: aprende la amplitud (línea centrada mientras tanto)
   if (!escala.inicializada) {
     if (escala.cantidad >= ESCALA_APRENDER) {
       escala.maximo = escala.bloqueMaximo;
@@ -85,10 +73,8 @@ uint8_t Pantalla::escalar(EscalaAutomatica& escala, float valor, float spanMinim
     return ALTO_WAVE / 2;
   }
 
-  // Si la señal crece, la escala sube al instante
   if (a > escala.maximo) escala.maximo = a;
 
-  // Si la señal se achica, la escala baja cada bloque
   if (escala.cantidad >= ESCALA_BLOQUE) {
     escala.maximo += ESCALA_FACTOR * (escala.bloqueMaximo - escala.maximo);
     escala.bloqueMaximo = 0.0f;
@@ -97,19 +83,15 @@ uint8_t Pantalla::escalar(EscalaAutomatica& escala, float valor, float spanMinim
 
   float amp = escala.maximo;
   if (amp < 0.5f * spanMinimo) amp = 0.5f * spanMinimo;
-  amp *= 1.1f;   // margen del 10 %
+  amp *= 1.1f;
 
   int salida = (int)(ALTO_WAVE * 0.5f + (valor / amp) * ALTO_WAVE * 0.5f + 0.5f);
   salida = constrain(salida, 0, ALTO_WAVE);
   if (invertir) salida = ALTO_WAVE - salida;
-
   return (uint8_t)salida;
 }
 
-// ============================================================
-// Alarma visual: misma prioridad que el sonido
-// ALTO > MEDIO > TÉCNICA > BAJO
-// ============================================================
+// ---------------- Alarma visual: ALTO > MEDIO > TÉCNICA > BAJO ----------------
 
 uint8_t Pantalla::nivelVisual(const EstadoAlarma& a) {
   if (a.nivel == ALARMA_ALTA)  return VIS_ALTO;
@@ -118,9 +100,44 @@ uint8_t Pantalla::nivelVisual(const EstadoAlarma& a) {
   return VIS_BAJO;
 }
 
-// ============================================================
-// Lee "CAL <SBP> <DBP>" sin bloquear y lo manda a Procesamiento
-// ============================================================
+// ---------------- Números ----------------
+
+void Pantalla::mostrarNumeros(const Signos& s) {
+#if CALIBRAR_SPO2
+  numero("nHR",   s.calR100);
+  numero("nPR",   s.calPi100);
+  numero("nSpO2", s.calDcK);
+  numero("nSBP",  s.calEstadoLib);
+  numero("nDBP",  s.estadoSpo2);
+#else
+  numero("nHR",   s.fc);
+  numero("nPR",   s.pr);
+  numero("nSpO2", s.spo2);
+  numero("nSBP",  s.sbp);
+  numero("nDBP",  s.dbp);
+#endif
+
+  numero(NEX_OBJ_FR, (s.fr > 0) ? s.fr : 0);
+#if USAR_TEXTO_ESTADO_FR
+  char b[40];
+  snprintf(b, sizeof(b), "%s.txt=\"%s\"", NEX_OBJ_FR_TXT, textoEstadoFR(s.frEstado));
+  comando(b);
+#else
+  (void)textoEstadoFR;
+#endif
+
+#if MOSTRAR_DIAG
+  uint32_t rs;
+  portENTER_CRITICAL(&muxCont); rs = resincronizaciones; portEXIT_CRITICAL(&muxCont);
+  numero("nTemp", (int)rs);
+#endif
+
+#if MOSTRAR_MEMORIA
+  numero("nTemp", (int)(ESP.getMinFreeHeap() / 1024));   // KB libres en el peor momento
+#endif
+}
+
+// ---------------- Comando "CAL <SBP> <DBP>" ----------------
 
 void Pantalla::leerComandos() {
   while (Serial.available()) {
@@ -138,44 +155,12 @@ void Pantalla::leerComandos() {
     } else if (c >= 32 && c <= 126) {
       if (cmdIdx < sizeof(cmdBuf) - 1) cmdBuf[cmdIdx++] = c;
     } else {
-      cmdIdx = 0;   // bytes de eventos Nextion (0x65, 0xFF...) reinician el buffer
+      cmdIdx = 0;
     }
   }
 }
 
-// ============================================================
-// Números (normal o modo calibración de SpO2)
-// ============================================================
-
-void Pantalla::mostrarNumeros(const Signos& s) {
-#if CALIBRAR_SPO2
-  numero("nHR",   s.calR100);        // R x 100
-  numero("nPR",   s.calPi100);       // índice de perfusión x 100 (%)
-  numero("nSpO2", s.calDcK);         // DC IR en miles de cuentas
-  numero("nSBP",  s.calEstadoLib);   // estado de la librería (0, 1, 2)
-  numero("nDBP",  s.estadoSpo2);     // estado efectivo        (0, 1, 2)
-#else
-  numero("nHR",   s.fc);
-  numero("nPR",   s.pr);
-  numero("nSpO2", s.spo2);
-  numero("nSBP",  s.sbp);
-  numero("nDBP",  s.dbp);
-#endif
-
-  // FR: 0 en pantalla = todavía sin valor fiable
-  numero(NEX_OBJ_FR, (s.fr > 0) ? s.fr : 0);
-#if USAR_TEXTO_ESTADO_FR
-  char b[40];
-  snprintf(b, sizeof(b), "%s.txt=\"%s\"", NEX_OBJ_FR_TXT, textoEstadoFR(s.frEstado));
-  comando(b);
-#else
-  (void)textoEstadoFR;
-#endif
-}
-
-// ============================================================
-// Lazo de la tarea (núcleo 0, prio 2)
-// ============================================================
+// ---------------- Lazo de la tarea (núcleo 0, prio 2) ----------------
 
 void Pantalla::bucle() {
   TickType_t tUlt = xTaskGetTickCount();
