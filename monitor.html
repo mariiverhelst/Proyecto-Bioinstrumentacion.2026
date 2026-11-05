@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estación de enfermería - Monitor EIA</title>
+<style>
+  :root {
+    --fondo: #0f1419; --tarjeta: #1a2129; --borde: #2a333d; --texto: #e6e9ec; --tenue: #8a96a3;
+    --ecg: #3ddc84; --spo2: #4aa3ff; --pa: #ffffff; --temp: #ffb3c7; --fr: #ffe14d;
+    --azul: #1f4fd8; --amarillo: #ffd400; --rojo: #e02424;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--fondo); color: var(--texto); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--borde); }
+  header h1 { font-size: 18px; margin: 0; flex: 1 1 auto; }
+  button { font-size: 15px; padding: 9px 16px; border-radius: 8px; border: none; background: var(--spo2); color: #fff; cursor: pointer; }
+  button.secundario { background: #3a4552; }
+  button.verde { background: #1f8a4c; }
+  button.ambar { background: #b07a00; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #estado { font-size: 14px; color: var(--tenue); }
+  #estado.ok { color: var(--ecg); }
+  #estado.error { color: #ff6b6b; }
+  h2 { font-size: 15px; margin: 0 0 10px; color: var(--tenue); font-weight: 600; }
+  h3 { font-size: 13px; margin: 0 0 8px; color: var(--tenue); font-weight: 600; }
+  .bloque { margin: 14px 18px 0; padding: 12px 14px; border-radius: 10px; background: var(--tarjeta); border: 1px solid var(--borde); }
+  .campos { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .campos label { font-size: 12px; color: var(--tenue); display: block; margin-bottom: 4px; }
+  .campos input, .campos select { width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--borde); background: #0f1419; color: var(--texto); font-size: 14px; }
+  .fila { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+  .nota { font-size: 13px; color: var(--tenue); }
+  #config { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  #config > div { border: 1px solid var(--borde); border-radius: 8px; padding: 10px 12px; }
+
+  #alarma { margin: 14px 18px 0; padding: 12px 16px; border-radius: 10px; font-weight: 600; font-size: 16px; text-align: center; background: #2a333d; color: var(--tenue); }
+  #alarma.bajo    { background: var(--azul); color: #fff; }
+  #alarma.tecnica { background: var(--amarillo); color: #111; }
+  #alarma.medio   { animation: parpadeoMedio 2s steps(1) infinite; }
+  #alarma.alto    { animation: parpadeoAlto 0.5s steps(1) infinite; }
+  @keyframes parpadeoMedio { 0% { background: var(--amarillo); color: #111; } 50% { background: #2a2a10; color: var(--amarillo); } }
+  @keyframes parpadeoAlto  { 0% { background: var(--rojo); color: #fff; }    50% { background: #3a1010; color: var(--rojo); } }
+
+  #graficas { padding: 14px 18px 0; display: grid; gap: 12px; }
+  .grafica { background: #000; border: 1px solid var(--borde); border-radius: 10px; padding: 8px 10px; position: relative; }
+  .grafica .etiqueta { position: absolute; top: 8px; left: 12px; font-size: 13px; font-weight: 600; }
+  .grafica canvas { width: 100%; height: 160px; display: block; }
+
+  #signos { display: grid; gap: 12px; padding: 14px 18px 0; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .tarjeta { background: var(--tarjeta); border: 1px solid var(--borde); border-radius: 10px; padding: 12px 14px; }
+  .tarjeta .nombre { font-size: 13px; color: var(--tenue); }
+  .tarjeta .valor  { font-size: 40px; font-weight: 700; line-height: 1.1; margin-top: 4px; }
+  .tarjeta .unidad { font-size: 14px; color: var(--tenue); margin-left: 4px; font-weight: 400; }
+
+  #diag { margin: 14px 18px 18px; padding: 10px 14px; border-radius: 10px; background: var(--tarjeta); border: 1px solid var(--borde); font-size: 13px; color: var(--tenue); display: flex; flex-wrap: wrap; gap: 18px; }
+  #diag b { color: var(--texto); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Estación de enfermería · Monitor EIA</h1>
+  <span id="estado">Desconectado</span>
+  <button id="btnConectar">Conectar</button>
+  <button id="btnDesconectar" class="secundario" disabled>Desconectar</button>
+</header>
+
+<section class="bloque">
+  <h2>Datos del paciente</h2>
+  <div class="campos">
+    <div><label for="pNombre">Nombre</label><input id="pNombre" type="text"></div>
+    <div><label for="pId">ID</label><input id="pId" type="text"></div>
+    <div><label for="pEdad">Edad (años)</label><input id="pEdad" type="number" min="0" max="120"></div>
+    <div><label for="pSexo">Sexo</label><select id="pSexo"><option value=""></option><option>F</option><option>M</option><option>Otro</option></select></div>
+    <div><label for="pCama">Cama</label><input id="pCama" type="text"></div>
+    <div><label for="pRh">RH</label><select id="pRh"><option value=""></option><option>O+</option><option>O-</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>AB+</option><option>AB-</option></select></div>
+    <div><label for="pPeso">Peso (kg)</label><input id="pPeso" type="number" min="0" step="0.1"></div>
+    <div><label for="pEstatura">Estatura (cm)</label><input id="pEstatura" type="number" min="0"></div>
+  </div>
+</section>
+
+<div id="alarma">Sin datos</div>
+
+<section id="graficas">
+  <div class="grafica"><span class="etiqueta" style="color:var(--ecg)">ECG · II</span><canvas id="cEcg"></canvas></div>
+  <div class="grafica"><span class="etiqueta" style="color:var(--spo2)">PLETH (PPG)</span><canvas id="cPpg"></canvas></div>
+</section>
+
+<section id="signos">
+  <div class="tarjeta"><div class="nombre">Frecuencia cardíaca (ECG)</div><div class="valor" style="color:var(--ecg)"><span id="vFC">--</span><span class="unidad">lpm</span></div></div>
+  <div class="tarjeta"><div class="nombre">Frecuencia de pulso (PPG)</div><div class="valor" style="color:var(--spo2)"><span id="vPR">--</span><span class="unidad">lpm</span></div></div>
+  <div class="tarjeta"><div class="nombre">Saturación de oxígeno</div><div class="valor" style="color:var(--spo2)"><span id="vSpO2">--</span><span class="unidad">%</span></div></div>
+  <div class="tarjeta"><div class="nombre">Presión arterial (PTT)</div><div class="valor" style="color:var(--pa)"><span id="vPA">--/--</span><span class="unidad">mmHg</span></div></div>
+  <div class="tarjeta"><div class="nombre">Frecuencia respiratoria (estimada)</div><div class="valor" style="color:var(--fr)"><span id="vFR">--</span><span class="unidad">rpm</span></div></div>
+  <div class="tarjeta"><div class="nombre">Temperatura</div><div class="valor" style="color:var(--temp)"><span id="vTemp">--</span><span class="unidad">°C</span></div></div>
+  <div class="tarjeta"><div class="nombre">Puntaje NEWS2 (parcial)</div><div class="valor"><span id="vNews">--</span></div></div>
+</section>
+
+<section class="bloque">
+  <h2>Alarmas y calibración</h2>
+  <div id="config">
+    <div>
+      <h3>Límites de alarma</h3>
+      <div class="campos">
+        <div><label for="lFcMax">FC máx. (lpm)</label><input id="lFcMax" type="number"></div>
+        <div><label for="lFcMin">FC mín. (lpm)</label><input id="lFcMin" type="number"></div>
+        <div><label for="lSpo2Min">SpO₂ mín. (%)</label><input id="lSpo2Min" type="number"></div>
+        <div><label for="lPasMax">PAS máx. (mmHg)</label><input id="lPasMax" type="number"></div>
+        <div><label for="lPasMin">PAS mín. (mmHg)</label><input id="lPasMin" type="number"></div>
+      </div>
+      <div class="fila"><button id="btnLimites">Aplicar límites</button></div>
+      <div class="nota" id="infoLimites">Límites en el monitor: --</div>
+    </div>
+    <div>
+      <h3>Silenciar alarmas</h3>
+      <div class="fila"><button id="btnSilencio" class="ambar">Silenciar 2 min</button></div>
+      <div class="nota" id="infoSilencio">Sonido de alarmas activo.</div>
+    </div>
+    <div>
+      <h3>Calibración de la presión arterial</h3>
+      <div class="campos">
+        <div><label for="cSbp">Sistólica (mmHg)</label><input id="cSbp" type="number" value="120"></div>
+        <div><label for="cDbp">Diastólica (mmHg)</label><input id="cDbp" type="number" value="80"></div>
+      </div>
+      <div class="fila"><button id="btnCalibrar">Calibrar PA</button></div>
+      <div class="nota" id="infoCal">Use los valores de un tensiómetro tomados en este momento.</div>
+    </div>
+  </div>
+</section>
+
+<section class="bloque" id="registro">
+  <h2>Registro de datos</h2>
+  <div class="fila" style="margin-top:0">
+    <button id="btnSignos" class="verde">Descargar signos (CSV)</button>
+    <button id="btnOndas" class="verde">Descargar ondas (CSV)</button>
+    <button id="btnNuevo" class="secundario">Nuevo registro</button>
+  </div>
+  <div class="nota" id="infoRegistro" style="margin-top:8px">Sin datos registrados.</div>
+</section>
+
+<div id="diag">
+  <span>Paquetes/s · ECG: <b id="dE">0</b></span>
+  <span>PPG: <b id="dP">0</b></span>
+  <span>Números: <b id="dN">0</b></span>
+  <span>Último dato hace: <b id="dEdad">--</b></span>
+</div>
+
+<script>
+// ============================================================
+// Configuración: debe coincidir con el ESP32
+// ============================================================
+const BLE_NOMBRE        = "Monitor-EIA";
+const BLE_UUID_SERVICIO = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const BLE_UUID_DATOS    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const BLE_UUID_COMANDOS = "beb5483f-36e1-4688-b7f5-ea07361b26a8";
+
+const INVERTIR_ECG = true;
+const INVERTIR_PPG = true;
+
+const FS_ONDAS       = 125;
+const VENTANA_PUNTOS = 625;
+const HUECO_BARRIDO  = 12;
+const SPAN_MIN_ECG   = 100;
+const SPAN_MIN_PPG   = 100;
+const MAX_ONDAS      = FS_ONDAS * 60 * 5;
+
+const $ = (id) => document.getElementById(id);
+
+// ============================================================
+// Datos del paciente
+// ============================================================
+const CAMPOS = [
+  ["pNombre", "Nombre"], ["pId", "ID"], ["pEdad", "Edad (años)"], ["pSexo", "Sexo"],
+  ["pCama", "Cama"], ["pRh", "RH"], ["pPeso", "Peso (kg)"], ["pEstatura", "Estatura (cm)"]
+];
+function cargarPaciente() {
+  try { const d = JSON.parse(localStorage.getItem("pacienteMonitorEIA") || "{}");
+        CAMPOS.forEach(([id]) => { if (d[id] !== undefined) $(id).value = d[id]; }); } catch (e) {}
+}
+function guardarPaciente() {
+  try { const d = {}; CAMPOS.forEach(([id]) => { d[id] = $(id).value; });
+        localStorage.setItem("pacienteMonitorEIA", JSON.stringify(d)); } catch (e) {}
+}
+CAMPOS.forEach(([id]) => $(id).addEventListener("input", guardarPaciente));
+cargarPaciente();
+
+// ============================================================
+// Traza
+// ============================================================
+class Traza {
+  constructor(idCanvas, color, invertir, spanMin) {
+    this.canvas = document.getElementById(idCanvas); this.ctx = this.canvas.getContext("2d");
+    this.color = color; this.invertir = invertir; this.spanMin = spanMin;
+    this.buf = new Float32Array(VENTANA_PUNTOS); this.pos = 0; this.amp = spanMin;
+  }
+  agregar(v) { this.buf[this.pos] = v; this.pos = (this.pos + 1) % VENTANA_PUNTOS; }
+  limpiar()  { this.buf.fill(0); this.pos = 0; this.amp = this.spanMin; }
+  ajustarTamano() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(this.canvas.clientWidth * dpr), h = Math.round(this.canvas.clientHeight * dpr);
+    if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
+  }
+  dibujar() {
+    this.ajustarTamano();
+    const ctx = this.ctx, w = this.canvas.width, h = this.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
+    for (let i = 1; i < 10; i++) { const x = (i / 10) * w; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+    let maxAbs = 0;
+    for (let i = 0; i < VENTANA_PUNTOS; i++) { const a = Math.abs(this.buf[i]); if (a > maxAbs) maxAbs = a; }
+    const objetivo = Math.max(maxAbs, this.spanMin) * 1.1;
+    if (objetivo > this.amp) this.amp = objetivo; else this.amp += 0.03 * (objetivo - this.amp);
+    const signo = this.invertir ? 1 : -1, mitad = h / 2, escala = (mitad - 4) / this.amp;
+    const xDe = (i) => (i / (VENTANA_PUNTOS - 1)) * w, yDe = (v) => mitad + signo * v * escala;
+    ctx.strokeStyle = this.color; ctx.lineWidth = 1.5 * (window.devicePixelRatio || 1);
+    ctx.beginPath();
+    for (let i = 0; i < this.pos; i++) { if (i === 0) ctx.moveTo(xDe(i), yDe(this.buf[i])); else ctx.lineTo(xDe(i), yDe(this.buf[i])); }
+    const ini = this.pos + HUECO_BARRIDO;
+    for (let i = ini; i < VENTANA_PUNTOS; i++) { if (i === ini) ctx.moveTo(xDe(i), yDe(this.buf[i])); else ctx.lineTo(xDe(i), yDe(this.buf[i])); }
+    ctx.stroke();
+    ctx.fillStyle = this.color; ctx.fillRect(xDe(this.pos), 0, 2, h);
+  }
+}
+const css = getComputedStyle(document.documentElement);
+const trazaEcg = new Traza("cEcg", css.getPropertyValue("--ecg").trim(),  INVERTIR_ECG, SPAN_MIN_ECG);
+const trazaPpg = new Traza("cPpg", css.getPropertyValue("--spo2").trim(), INVERTIR_PPG, SPAN_MIN_PPG);
+(function animar() { trazaEcg.dibujar(); trazaPpg.dibujar(); requestAnimationFrame(animar); })();
+
+// ============================================================
+// Registro de datos y CSV
+// ============================================================
+let registroSignos = [], ondasEcg = [], ondasPpg = [], inicioOndas = null;
+const TEXTO_NIVEL = ["Bajo", "Medio", "Alto", "Tecnica"];
+
+function nuevoRegistro() { registroSignos = []; ondasEcg = []; ondasPpg = []; inicioOndas = null; actualizarInfoRegistro(); }
+function guardarOnda(arr, v) {
+  if (inicioOndas === null) inicioOndas = new Date();
+  arr.push(v);
+  if (arr.length > MAX_ONDAS + 1000) {
+    arr.splice(0, 1000);
+    if (arr === ondasEcg) inicioOndas = new Date(inicioOndas.getTime() + 1000 * 1000 / FS_ONDAS);
+  }
+}
+function actualizarInfoRegistro() {
+  if (registroSignos.length === 0) { $("infoRegistro").textContent = "Sin datos registrados."; return; }
+  const seg = registroSignos.length, min = Math.floor(seg / 60), s = seg % 60;
+  const minOndas = (Math.min(ondasEcg.length, ondasPpg.length) / FS_ONDAS / 60).toFixed(1);
+  $("infoRegistro").textContent = `Signos: ${seg} filas (${min} min ${s} s) · Ondas: últimos ${minOndas} min de ECG y PPG`;
+}
+const dos = (n) => String(n).padStart(2, "0");
+const fechaTexto   = (d) => `${d.getFullYear()}-${dos(d.getMonth() + 1)}-${dos(d.getDate())} ${dos(d.getHours())}:${dos(d.getMinutes())}:${dos(d.getSeconds())}`;
+const fechaArchivo = (d) => `${d.getFullYear()}${dos(d.getMonth() + 1)}${dos(d.getDate())}_${dos(d.getHours())}${dos(d.getMinutes())}`;
+const limpio = (t) => String(t).replace(/[;\r\n]/g, " ").trim();
+function encabezadoPaciente() {
+  let t = "DATOS DEL PACIENTE\n";
+  CAMPOS.forEach(([id, nombre]) => { t += `${nombre};${limpio($(id).value)}\n`; });
+  return t + `Descargado;${fechaTexto(new Date())}\n\n`;
+}
+function descargar(nombre, texto) {
+  const blob = new Blob(["\ufeff" + texto], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = nombre; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function nombreArchivo(tipo) {
+  const id = limpio($("pId").value).replace(/\s+/g, "") || "paciente";
+  return `${tipo}_${id}_${fechaArchivo(new Date())}.csv`;
+}
+function descargarSignos() {
+  if (registroSignos.length === 0) { alert("Todavía no hay signos registrados."); return; }
+  let t = encabezadoPaciente() + "Fecha y hora;FC (lpm);PR (lpm);SpO2 (%);FR (rpm);PAS (mmHg);PAD (mmHg);Temp (C);NEWS2;Alarma\n";
+  for (const r of registroSignos)
+    t += [fechaTexto(r.t), r.fc, r.pr, r.spo2, r.fr, r.pas, r.pad, r.temp, r.news2, TEXTO_NIVEL[r.nivel] || ""].join(";") + "\n";
+  descargar(nombreArchivo("signos"), t);
+}
+function descargarOndas() {
+  const n = Math.min(ondasEcg.length, ondasPpg.length);
+  if (n === 0) { alert("Todavía no hay ondas registradas."); return; }
+  let t = encabezadoPaciente() + `Inicio;${fechaTexto(inicioOndas)}\nFrecuencia (Hz);${FS_ONDAS}\n\nTiempo (ms);ECG (uV);PPG (x10 uV)\n`;
+  const pasoMs = 1000 / FS_ONDAS;
+  for (let i = 0; i < n; i++) t += `${Math.round(i * pasoMs)};${ondasEcg[i]};${ondasPpg[i]}\n`;
+  descargar(nombreArchivo("ondas"), t);
+}
+$("btnSignos").addEventListener("click", descargarSignos);
+$("btnOndas").addEventListener("click", descargarOndas);
+$("btnNuevo").addEventListener("click", () => { if (confirm("¿Borrar todo lo registrado y empezar un registro nuevo?")) nuevoRegistro(); });
+
+// ============================================================
+// Conexión BLE
+// ============================================================
+let dispositivo = null, caracteristica = null, comandos = null, ultimoDatoMs = 0;
+let limitesCargados = false, silencioRestante = 0;
+const cuenta = { E: 0, P: 0, N: 0 };
+
+function ponerEstado(texto, clase) { $("estado").textContent = texto; $("estado").className = clase || ""; }
+
+async function conectar() {
+  if (!navigator.bluetooth) { ponerEstado("Este navegador no tiene Web Bluetooth (use Chrome o Edge)", "error"); return; }
+  try {
+    ponerEstado("Buscando...");
+    dispositivo = await navigator.bluetooth.requestDevice({ filters: [{ name: BLE_NOMBRE }], optionalServices: [BLE_UUID_SERVICIO] });
+    dispositivo.addEventListener("gattserverdisconnected", alDesconectar);
+    ponerEstado("Conectando...");
+    const servidor = await dispositivo.gatt.connect();
+    const servicio = await servidor.getPrimaryService(BLE_UUID_SERVICIO);
+    caracteristica = await servicio.getCharacteristic(BLE_UUID_DATOS);
+    comandos = await servicio.getCharacteristic(BLE_UUID_COMANDOS);
+    await caracteristica.startNotifications();
+    caracteristica.addEventListener("characteristicvaluechanged", alRecibir);
+    trazaEcg.limpiar(); trazaPpg.limpiar();
+    limitesCargados = false;
+    ponerEstado("Conectado a " + dispositivo.name, "ok");
+    $("btnConectar").disabled = true; $("btnDesconectar").disabled = false;
+  } catch (err) {
+    ponerEstado("No se pudo conectar: " + err.message, "error");
+  }
+}
+function desconectar() { if (dispositivo && dispositivo.gatt.connected) dispositivo.gatt.disconnect(); }
+function alDesconectar() {
+  comandos = null;
+  ponerEstado("Conexión perdida. Presione Conectar para reconectar.", "error");
+  $("btnConectar").disabled = false; $("btnDesconectar").disabled = true;
+  $("alarma").className = ""; $("alarma").textContent = "Sin conexión con el monitor";
+}
+
+async function enviarComando(bytes) {
+  if (!comandos) { alert("Primero conecte el monitor."); return false; }
+  try { await comandos.writeValue(new Uint8Array(bytes)); return true; }
+  catch (e) { alert("No se pudo enviar al monitor: " + e.message); return false; }
+}
+
+// ============================================================
+// Alarmas y calibración (página -> monitor)
+// ============================================================
+const num = (id) => parseInt($(id).value, 10);
+
+async function aplicarLimites() {
+  const L = { fcMax: num("lFcMax"), fcMin: num("lFcMin"), spo2Min: num("lSpo2Min"), pasMax: num("lPasMax"), pasMin: num("lPasMin") };
+  const ok = L.fcMax >= 60 && L.fcMax <= 220 && L.fcMin >= 30 && L.fcMin + 10 <= L.fcMax &&
+             L.spo2Min >= 80 && L.spo2Min <= 100 &&
+             L.pasMax >= 100 && L.pasMax <= 250 && L.pasMin >= 60 && L.pasMin + 10 <= L.pasMax;
+  if (!ok) {
+    alert("Límites no válidos. Rangos: FC máx. 60-220, FC mín. 30 y al menos 10 menos que el máx.; " +
+          "SpO₂ mín. 80-100; PAS máx. 100-250, PAS mín. 60 y al menos 10 menos que el máx.");
+    return;
+  }
+  if (await enviarComando([76, L.fcMax, L.fcMin, L.spo2Min, L.pasMax, L.pasMin]))   // 'L'
+    $("infoLimites").textContent = "Enviado. Confirmando con el monitor...";
+}
+
+async function alternarSilencio() {
+  const activar = silencioRestante === 0;
+  await enviarComando([83, activar ? 1 : 0]);   // 'S'
+}
+
+async function calibrar() {
+  const s = num("cSbp"), d = num("cDbp");
+  if (!(s >= 60 && s <= 250 && d >= 30 && d < s)) { alert("Valores no válidos (sistólica 60-250 y mayor que la diastólica)."); return; }
+  if (await enviarComando([67, s, d]))           // 'C'
+    $("infoCal").textContent = `Calibrando con ${s}/${d} mmHg. La PA aparece en ~15-20 s (electrodos y dedo puestos, quieto).`;
+}
+
+$("btnLimites").addEventListener("click", aplicarLimites);
+$("btnSilencio").addEventListener("click", alternarSilencio);
+$("btnCalibrar").addEventListener("click", calibrar);
+
+// ============================================================
+// Recepción (monitor -> página)
+// ============================================================
+function alRecibir(evento) {
+  const dv = evento.target.value;
+  if (dv.byteLength < 1) return;
+  const tipo = String.fromCharCode(dv.getUint8(0));
+  ultimoDatoMs = performance.now();
+  if (tipo === "N" && dv.byteLength >= 13)      { cuenta.N++; mostrarNumeros(dv); }
+  else if (tipo === "E" && dv.byteLength >= 19) { cuenta.E++; agregarOnda(dv, trazaEcg, ondasEcg); }
+  else if (tipo === "P" && dv.byteLength >= 19) { cuenta.P++; agregarOnda(dv, trazaPpg, ondasPpg); }
+  else if (tipo === "L" && dv.byteLength >= 6)  { mostrarLimites(dv); }
+}
+
+function agregarOnda(dv, traza, arr) {
+  for (let i = 0; i < 9; i++) { const v = dv.getInt16(1 + 2 * i, true); traza.agregar(v); guardarOnda(arr, v); }
+}
+
+function mostrarLimites(dv) {
+  const L = [dv.getUint8(1), dv.getUint8(2), dv.getUint8(3), dv.getUint8(4), dv.getUint8(5)];
+  $("infoLimites").textContent = `Límites en el monitor: FC ${L[1]}-${L[0]} lpm · SpO₂ ≥ ${L[2]} % · PAS ${L[4]}-${L[3]} mmHg`;
+  if (!limitesCargados) {
+    ["lFcMax", "lFcMin", "lSpo2Min", "lPasMax", "lPasMin"].forEach((id, i) => { $(id).value = L[i]; });
+    limitesCargados = true;
+  }
+}
+
+function mostrarNumeros(dv) {
+  const fc = dv.getUint8(1), pr = dv.getUint8(2), spo2 = dv.getUint8(3), fr = dv.getUint8(4);
+  const pas = dv.getUint8(5), pad = dv.getUint8(6), temp10 = dv.getInt16(7, true);
+  const news2 = dv.getUint8(9), nivel = dv.getUint8(10);
+  silencioRestante = dv.getUint8(12);
+
+  const o = (v) => (v > 0 ? v : "--");
+  $("vFC").textContent = o(fc); $("vPR").textContent = o(pr); $("vSpO2").textContent = o(spo2); $("vFR").textContent = o(fr);
+  $("vPA").textContent = (pas > 0 && pad > 0) ? (pas + "/" + pad) : "--/--";
+  $("vTemp").textContent = temp10 > 0 ? (temp10 / 10).toFixed(1) : "--";
+  $("vNews").textContent = news2;
+  mostrarAlarma(nivel, news2);
+
+  // Silencio
+  if (silencioRestante > 0) {
+    $("btnSilencio").textContent = "Reactivar sonido";
+    $("infoSilencio").textContent = `Alarmas silenciadas: quedan ${silencioRestante} s (las barras siguen activas).`;
+  } else {
+    $("btnSilencio").textContent = "Silenciar 2 min";
+    $("infoSilencio").textContent = "Sonido de alarmas activo.";
+  }
+
+  // Registro
+  const c = (v) => (v > 0 ? v : "");
+  registroSignos.push({
+    t: new Date(), fc: c(fc), pr: c(pr), spo2: c(spo2), fr: c(fr),
+    pas: c(pas), pad: (pas > 0 ? c(pad) : ""), temp: temp10 > 0 ? (temp10 / 10).toFixed(1).replace(".", ",") : "",
+    news2: news2, nivel: nivel
+  });
+  actualizarInfoRegistro();
+}
+
+function mostrarAlarma(nivel, news2) {
+  const a = $("alarma");
+  switch (nivel) {
+    case 2:  a.className = "alto";    a.textContent = "RIESGO ALTO · NEWS2 " + news2;  break;
+    case 1:  a.className = "medio";   a.textContent = "RIESGO MEDIO · NEWS2 " + news2; break;
+    case 3:  a.className = "tecnica"; a.textContent = "ALARMA TÉCNICA · Sensor de SpO₂ retirado"; break;
+    default: a.className = "bajo";    a.textContent = "Riesgo bajo · NEWS2 " + news2;  break;
+  }
+}
+
+// ============================================================
+// Diagnóstico
+// ============================================================
+setInterval(() => {
+  $("dE").textContent = cuenta.E; $("dP").textContent = cuenta.P; $("dN").textContent = cuenta.N;
+  cuenta.E = cuenta.P = cuenta.N = 0;
+  if (ultimoDatoMs > 0) $("dEdad").textContent = ((performance.now() - ultimoDatoMs) / 1000).toFixed(1) + " s";
+}, 1000);
+
+$("btnConectar").addEventListener("click", conectar);
+$("btnDesconectar").addEventListener("click", desconectar);
+</script>
+</body>
+</html>

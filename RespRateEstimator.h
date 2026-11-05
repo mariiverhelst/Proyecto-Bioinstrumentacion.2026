@@ -40,7 +40,7 @@ namespace RespRate {
 static const float kPi = 3.14159265358979f;
 
 // ---- Dimensionamiento estático (memoria fija, sin malloc) -----------------
-static const int kWindowS     = 32;                    // ventana de análisis [s]
+static const int kWindowS     = 20;                    // ventana de análisis [s]
 static const int kGridHz      = 4;                     // remuestreo de series respiratorias [Hz]
 static const int kGridMax     = kWindowS * kGridHz + 4;
 static const int kMaxBeats    = 160;                   // latidos por canal (32 s a 200 lpm = 107)
@@ -96,7 +96,7 @@ struct Config {
   float intervalTol     = 0.30f;     // desviación máx. respecto de la mediana
   float minValidFrac    = 0.70f;     // fracción mínima de latidos válidos en la ventana
   float maxAmpCv        = 0.60f;     // CV máx. de la amplitud (artefacto de movimiento)
-  int   minBeatsWindow  = 20;        // >= 20 latidos en 32 s (FC >= ~38 lpm)
+  int   minBeatsWindow  = 12;        // >= 20 latidos en 32 s (FC >= ~38 lpm)
 
   // Estimación espectral y fusión
   float peakHalfWidthHz = 0.05f;     // ancho a cada lado del pico para la métrica de calidad
@@ -106,7 +106,7 @@ struct Config {
   float clusterTolBpm   = 2.0f;      // tolerancia de coincidencia entre características
 
   // Suavizado / pantalla
-  float hopS            = 5.0f;      // periodo de actualización de la estimación
+  float hopS            = 3.0f;      // periodo de actualización de la estimación
   float maxJumpBpm      = 8.0f;      // salto máx. admitido sin confirmación
   float emaAlpha        = 0.4f;
   float holdS           = 30.0f;     // tiempo máx. que se retiene el último valor
@@ -483,7 +483,7 @@ class Estimator {
   bool estimateFeature(int m, float hrHz, float& bpm, float& q, uint16_t& why) {
     if (m < 12) { why |= R_FEW_BEATS; return false; }
     float t0 = ft[0], span = ft[m - 1] - ft[0];
-    if (span < 24.0f) { why |= R_ARTIFACT; return false; }
+    if (span < 0.7f * kWindowS) { why |= R_ARTIFACT; return false; }
     for (int i = 1; i < m; i++) if (ft[i] - ft[i - 1] > 4.0f) { why |= R_ARTIFACT; return false; }  // hueco > 4 s
     int N = (int)(span * kGridHz) + 1; if (N > kGridMax) N = kGridMax;
     int j = 0;
